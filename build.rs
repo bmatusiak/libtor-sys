@@ -72,8 +72,13 @@ fn build_libevent() -> Artifacts {
     let mut config = autotools::Config::new(path.clone());
     config
         .out_dir(&root)
-        .config_option("host", Some(&host))
-        .env("CC", compiler.path())
+        // Cargo's HOST is the build machine (e.g. x86_64-unknown-linux-gnu).
+        // Autotools' --host must be the *target* when cross-compiling.
+        .config_option("host", Some(&target))
+        .env(
+            "CC",
+            env::var("CC").unwrap_or_else(|_| compiler.path().to_string_lossy().to_string()),
+        )
         .env("CFLAGS", compiler.cflags_env())
         .enable_static()
         .disable_shared()
@@ -136,13 +141,17 @@ fn build_tor(libevent: Artifacts) {
     // lzma and zstd are enabled by default, but it doesn't fail if it can't find it
     let mut config = autotools::Config::new(path.clone());
     config
-        .config_option("host", Some(&host))
-        .env("CC", compiler.path())
+        // Cargo's HOST is the build machine (e.g. x86_64-unknown-linux-gnu).
+        // Autotools' --host must be the *target* when cross-compiling.
+        .config_option("host", Some(&target))
+        .env(
+            "CC",
+            env::var("CC").unwrap_or_else(|_| compiler.path().to_string_lossy().to_string()),
+        )
         .with("libevent-dir", libevent.root.to_str())
         .enable("pic", None)
         //.enable("static-tor", None)
         .enable("static-libevent", None)
-        .enable("static-zlib", None)
         .disable("system-torrc", None)
         .disable("asciidoc", None)
         .disable("systemd", None)
@@ -159,6 +168,10 @@ fn build_tor(libevent: Artifacts) {
         .disable("rust", None);
     let mut cflags = String::new();
     cflags += &format!(" {}", compiler.cflags_env().into_string().unwrap());
+
+    if !target.contains("android") {
+        config.enable("static-zlib", None);
+    }
 
     if !cfg!(feature = "with-lzma") {
         config.disable("lzma", None);
@@ -195,30 +208,8 @@ fn build_tor(libevent: Artifacts) {
     }
 
     if target.contains("android") {
-        // zlib is part of the `sysroot` on android. Use `clang` to get the full path so that we
-        // can link with it.
-        let output = compiler
-            .to_command()
-            .args(&["--print-file-name", "libz.a"])
-            .output()
-            .expect("Failed to run `clang`");
-        if !output.status.success() {
-            panic!("`clang` did not complete successfully");
-        }
-        let libz_path =
-            std::str::from_utf8(&output.stdout).expect("Invalid path for `libz.a` returned");
-        let libz_path = PathBuf::from(libz_path);
-        let sysroot_lib = libz_path
-            .parent()
-            .expect("Invalid path for `libz.a` returned")
-            .to_str()
-            .unwrap();
-
-        config
-            .enable("android", None)
-            .with("zlib-dir", Some(&sysroot_lib));
-
-        println!("cargo:rustc-link-search=native={}", sysroot_lib);
+        // No special zlib handling needed when not forcing static zlib.
+        config.enable("android", None);
     } else {
         let mut zlib_dir = PathBuf::from(std_env_expected!("DEP_Z_ROOT"));
 
@@ -252,7 +243,11 @@ fn build_tor(libevent: Artifacts) {
         println!("cargo:rustc-link-lib=static={}", "event_pthreads");
     }
 
-    println!("cargo:rustc-link-lib=static={}", "z");
+    if target.contains("android") {
+        println!("cargo:rustc-link-lib={}", "z");
+    } else {
+        println!("cargo:rustc-link-lib=static={}", "z");
+    }
 
     println!("cargo:rustc-link-lib=static={}", "tor");
 
